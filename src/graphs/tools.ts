@@ -2,7 +2,8 @@ import "dotenv/config";
 import { tool } from "@langchain/core/tools";
 import * as z from "zod";
 import { ChatGroq } from "@langchain/groq";
-import { sendEmailReply } from "../utils/sendEmail.ts";
+import { sendEmailReply, sendEmailWithAttachment } from "../utils/sendEmail.ts";
+import path from "path";
 
 /* ===============================
    1. GROQ MODEL
@@ -47,8 +48,6 @@ function messageContentToStringtwo(content: any): string {
     return "";
 }
 
-
-
 /* ===============================
    2. EMAIL TOOLS (STUBS)
 ================================ */
@@ -72,7 +71,8 @@ MANDATORY DECISION LOGIC (DO NOT SKIP)
 
 IMPORTANT:
 You MUST analyze BOTH the email SUBJECT and the email BODY together.
-If urgency or action appears in EITHER the subject OR the body, it MUST affect the final decision.
+If urgency or action appears in EITHER the subject OR the body,
+it MUST affect the final decision.
 
 --------------------------------
 
@@ -101,18 +101,37 @@ STOP. Do NOT continue further checks.
 
 If AND ONLY IF step 1 is NO:
 
-Check BOTH subject AND body for ANY request that requires the user to DO something, including:
-- Sending resume, CV, portfolio, or documents
-- Uploading files or certificates
-- Filling or submitting any Google Form or online form
-- Replying with information
-- Completing any task or instruction
+Check BOTH subject AND body for ANY request that requires the user to DO something.
 
-Even if the request is polite, optional, or friendly,
-it MUST be classified as CTA.
+There are TWO possible CTA types:
 
-If YES, you MUST output:
-cta
+--------------------------------
+2️⃣A — CTA: STATIC DATA REQUEST (cta_data)
+
+If the email asks the user to SEND or SHARE any STATIC information or files,
+including but NOT limited to:
+- Resume, CV, biodata
+- Portfolio or GitHub link
+- Certificates or ID documents
+- Any fixed or pre-existing data
+- Replying with specific information
+
+THEN you MUST output:
+cta_data
+
+STOP. Do NOT continue.
+
+--------------------------------
+2️⃣B — CTA: FORM FILLING REQUEST (cta_form)
+
+If the email asks the user to:
+- Fill, submit, or complete any form
+- Fill a Google Form
+- Register through an online form
+- Enter details on a website or portal
+
+THEN you MUST output:
+cta_form
 
 STOP. Do NOT continue.
 
@@ -136,7 +155,8 @@ OUTPUT FORMAT RULES (ABSOLUTE)
 - Output EXACTLY ONE WORD
 - Allowed outputs ONLY:
 urgent
-cta
+cta_data
+cta_form
 information
 
 - NO punctuation
@@ -166,7 +186,12 @@ urgent
 Subject: Document Verification
 Body: Kindly share your documents for verification.
 Output:
-cta
+cta_data
+
+Subject: Internship Registration
+Body: Please fill out the Google Form to apply.
+Output:
+cta_form
 
 Subject: Upcoming College Seminar
 Body: This email is to inform you about the upcoming AI seminar.
@@ -177,11 +202,6 @@ Subject: Final Reminder
 Body: Fill the form or your application will be rejected.
 Output:
 urgent
-
-Subject: Meeting Schedule
-Body: Here are the meeting details for next week.
-Output:
-information
 
 --------------------------------
 Now classify the following email:
@@ -465,22 +485,6 @@ ${body}`
     }
 );
 
-export const classifyCta = tool(
-    ({ body }) => {
-        console.log("🧾 TOOL: classifyCta");
-        console.log({ body });
-        ;
-    },
-    {
-        name: "classify_cta",
-        description:
-            "Classify the cta email into fillformdraft or sendstaticdata",
-        schema: z.object({
-            body: z.string(),
-        }),
-    }
-);
-
 export const fillFormDraft = tool(
     ({ formLink }) => {
         console.log("🧾 TOOL: fillFormDraft");
@@ -498,20 +502,106 @@ export const fillFormDraft = tool(
 );
 
 export const sendStaticDocument = tool(
-    ({ documentName }) => {
+    async ({ documentName, from, subject, body }) => {
         console.log("📎 TOOL: sendStaticDocument");
-        console.log({ documentName });
+        console.log("Requested:", documentName);
+
+        const normalizedRequest = documentName.toLowerCase();
+
+        // Only handle resume
+        if (!normalizedRequest.includes("resume")) {
+            console.log("❌ Requested document is not resume");
+            return "document_not_found";
+        }
+
+        // Absolute path to resume in public folder
+        const filePath = path.join(process.cwd(), "public", "resume.pdf");
+
+        const response = await llm.invoke([
+            {
+                role: "system",
+                content: `
+You are a professional email assistant.
+
+TASK:
+- You are given the SUBJECT and BODY of an incoming email.
+- The user has requested a document (e.g., resume, portfolio, certificates).
+- You must write an appropriate email reply informing the sender that the requested document has been attached.
+- The reply should be polite, professional, and concise.
+
+REQUIREMENTS:
+- Output MUST be a valid JSON with EXACTLY two fields:
+  1. "subject" — the email subject line
+  2. "body" — the email body text
+- Do NOT include any additional text, explanations, or comments outside the JSON.
+- Make the subject relevant, starting with "Re:" if appropriate.
+- The body should clearly mention that the requested document is attached.
+
+EXAMPLES:
+
+Input:
+Subject: Request for Resume
+Body: Please send me your latest resume.
+
+Output:
+{
+  "subject": "Re: Request for Resume",
+  "body": "Hello, please find my latest resume attached as requested. Let me know if you need anything else. Best regards."
+}
+
+Input:
+Subject: Portfolio Request
+Body: Kindly share your design portfolio.
+
+Output:
+{
+  "subject": "Re: Portfolio Request",
+  "body": "Hi, I have attached my design portfolio as requested. Please let me know if you need further details. Best regards."
+}
+
+Now, generate a JSON reply for the following email:
+`,
+            },
+            {
+                role: "user",
+                content: `Subject:
+${subject}
+
+Body:
+${body}`
+            },
+
+        ]);
+
+        console.log("Tool Response : ", response.content)
+
+        const rawText = messageContentToStringtwo(response.content);
+        let parsed: { subject: string; body: string };
+        try {
+            parsed = JSON.parse(rawText);
+        } catch (err) {
+            console.error("❌ Failed to parse email JSON:", rawText);
+            throw err;
+        }
+
+        // Call email function
+        await sendEmailWithAttachment({attachmentPath: filePath, subject: parsed.subject, body: parsed.body, to: from});
+
+        console.log("✅ Resume sent successfully");
         return "document_sent";
     },
     {
         name: "send_static_data",
-        description:
-            "Send requested static document via email",
+        description: "Send requested static resume via email",
         schema: z.object({
             documentName: z.string(),
+            subject: z.string(),
+            body: z.string(),
+            from: z.string()
         }),
     }
 );
+
 
 /* ===============================
    EXPORTS

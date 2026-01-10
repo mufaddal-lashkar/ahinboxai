@@ -1,4 +1,7 @@
 // index.ts (type: module)
+import dns from "dns";
+
+dns.setDefaultResultOrder("ipv4first");
 import fs from 'fs';
 import path from 'path';
 import cron from 'node-cron';
@@ -7,6 +10,7 @@ import readline from 'readline';
 import { google } from 'googleapis';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
+import { graph } from "./agent.ts";
 
 config();
 
@@ -136,7 +140,7 @@ async function readEmails() {
 
         const headers = message.data.payload?.headers || [];
 
-        const id = msg.id
+        // const id = msg.id
 
         const subject =
             headers.find((h) => h.name === 'Subject')?.value || '';
@@ -146,7 +150,7 @@ async function readEmails() {
 
         const body = message.data.snippet || '';
 
-        const email = { id, from, subject, body };
+        const email = { from, subject, body };
 
         if (emailMatchesFilters(email)) {
             matchedEmails.push(email); // store in array
@@ -164,12 +168,15 @@ async function readEmails() {
 
     // Log all matched emails at once
     if (matchedEmails.length > 0) {
-        console.log('--------------------------');
-        console.log(`📧 Matched Emails (${matchedEmails.length})`);
-        console.log(matchedEmails);
-        console.log('--------------------------\n');
+        // console.log('--------------------------');
+        // console.log(`📧 Matched Emails (${matchedEmails.length})`);
+        // console.log(matchedEmails);
+        // console.log('--------------------------\n');
+
+        return matchedEmails
     } else {
         console.log('📭 No emails matched your filters');
+        return false
     }
 }
 
@@ -180,7 +187,77 @@ console.log('🚀 Gmail listener started (cron every 1 minute)');
 cron.schedule('*/1 * * * *', async () => {
     console.log('⏰ Checking emails...');
     try {
-        await readEmails();
+        const matchedEmails = await readEmails();
+        console.log("Matched Emails :: ", matchedEmails)
+        if (matchedEmails) {
+            const SYSTEM_PROMPT = `You are a deterministic execution agent.
+
+YOU MUST FOLLOW THESE RULES EXACTLY.
+NO EXCEPTIONS.
+
+--------------------------------
+TOOL CALL RULES (ABSOLUTE)
+--------------------------------
+
+1. You MUST call the tool "classify_email" EXACTLY ONCE.
+2. You are STRICTLY FORBIDDEN from calling "classify_email" again under ANY circumstance.
+3. You MUST NOT loop, retry, re-check, or re-evaluate any decision.
+4. You MUST NOT think, plan, or reason after receiving a tool response.
+
+--------------------------------
+DECISION RULES
+--------------------------------
+
+After receiving the result from "classify_email", follow these rules:
+
+- If the result is "informational":
+  → You MUST call the tool "summary_generated" exactly once.
+
+- If the result is "urgent":
+  → You MUST call the tool "send_urgent_reply" exactly once.
+
+- If the result is "cta_data":
+  → You MUST call the tool "send_static_data" exactly once.
+
+- If the result is "cta_form":
+  → You MUST END immediately.
+  → DO NOT call any tool.
+  → DO NOT take any action.
+
+--------------------------------
+EXECUTION FLOW (FINAL & IRREVERSIBLE)
+--------------------------------
+
+START
+→ Call classify_email (ONCE)
+→ Read tool output
+→ informational → call summary_generated → STOP
+→ urgent → call send_urgent_reply → STOP
+→ cta_data → call send_static_data → STOP
+→ cta_form → END (no action)
+
+This flow is FINAL and MUST be followed EXACTLY.
+`;
+            for (const email of matchedEmails) {
+                await graph.invoke({
+                    messages: [
+                        {
+                            role: "system",
+                            content: SYSTEM_PROMPT,
+                        },
+                        {
+                            role: "user",
+                            content: `
+Subject: ${email.subject}
+Body: ${email.body}
+From: ${email.from}
+`,
+                        },
+                    ],
+                });
+
+            }
+        }
     } catch (err) {
         console.error('❌ Cron error:', err);
     }
